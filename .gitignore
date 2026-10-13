@@ -1,0 +1,84 @@
+# 构建产物
+*.ko
+*.o
+*.mod
+*.mod.c
+*.order
+*.symvers
+*.cmd
+.tmp_versions/
+
+# 测试二进制 (本地重组 tests/programs/)
+tests/programs/test_iommu_verify
+tests/programs/test_rdma_verify
+tests/programs/test_swapout
+tests/programs/test_auto_repair
+tests/programs/test_rdma_write
+
+# 静态库产物
+lib/libsymrdma.a
+
+# LD_PRELOAD 拦截库
+nprdma/libnprdma.so
+
+# Level 6/7 测试二进制
+tests/programs/test_nprdma
+tests/programs/test_sir
+
+# Level 8/9 测试二进制
+tests/programs/test_nopin
+tests/programs/test_fault_sweep
+
+# Level 10-15 测试二进制
+tests/programs/test_atomic
+tests/programs/test_error_combos
+tests/programs/test_auto_sir
+tests/programs/test_transparent_read
+tests/programs/test_race_stress
+tests/programs/test_odp_compare
+
+# 第三方参考源码 (不入库: third_party/kernel-src = linux-5.11 内核源码参考)
+third_party/
+
+# 编辑器
+*.swp
+*.swo
+*~
+# OFED 源码包 (远程已解压, 不入库)
+MLNX_OFED_SRC-*.tgz
+
+# 本地开发目录 (工作文档/草稿, 不入库)
+local/
+
+# 历史遗留忽略项 (本地开发树用; 开源树无此目录)
+docs/devices/
+
+
+# 性能测量产物 (nopf_bw CSV/图)
+tests/results/
+
+#  (L20): 引擎 scratch 锁纪律白盒单测
+tests/programs/test_engine_scratch
+
+# 其余测试/诊断二进制 ( L19 组粒度 /  L16 相位 / diag)
+tests/programs/test_group_mapping
+tests/programs/test_sentinel_phase
+tests/programs/diag_notifier
+tests/programs/notif_holder
+tests/programs/npmapbench
+
+# Python 编排引擎 (symtest) 缓存
+__pycache__/
+*.pyc
+
+# compile_commands.json (本地编辑器索引, scripts/gen_compile_commands.py 生成)
+compile_commands.json
+
+# 内核模块本地编译残留依赖文件 (Kbuild)
+*.o.d
+
+# 本地网络配置备份 (cumulus 交换机, 手工快照)
+cumulus-backup-*/
+
+# 双机拓扑配置 (使用者本地, 含内网 IP; 模板 testbed.env.example)
+testbed.env

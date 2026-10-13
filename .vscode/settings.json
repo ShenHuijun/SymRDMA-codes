@@ -1,0 +1,11 @@
+{
+    // C/C++ 智能提示统一走 clangd (compile_commands.json 由
+    // scripts/gen_compile_commands.py 生成, 放在仓库根目录即自动发现)
+    "clangd.arguments": [
+        "--background-index",
+        "--header-insertion=never",
+        "--function-arg-placeholders=false"
+    ],
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "C_Cpp.errorSquiggles": "disabled"
+}

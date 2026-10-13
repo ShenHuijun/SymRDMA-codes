@@ -1,0 +1,32 @@
+# Kbuild for SymRDMA kernel module (v0.3)
+#
+# Build command:
+#   make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
+#
+# Requires:
+#   - Linux kernel headers (linux-headers-$(uname -r))
+#   - IOMMU enabled (intel_iommu=on or iommu=on)
+#   - 实测环境: Ubuntu 5.11.0-46 (双机测试床 host-a/host-b) + OFED 5.8
+#     (项目基线内核 = 测试床 5.11 单一目标; 5.4 分支 v0.26.0 /
+#      5.15 支持 v0.27.0 移除, )
+#
+# v0.3 changes: 提取 proc 代码, 新增 nic.c, 移除 5.4 兼容代码,
+#   修复 REPAIR 路径, 添加模块参数 mode/pci_bdf
+
+obj-m := symrdma.o
+
+symrdma-y := symrdma_main.o \
+             symrdma_iommu.o \
+             symrdma_mr.o \
+             symrdma_notifier.o \
+             symrdma_pin.o \
+             symrdma_version.o \
+             symrdma_dev.o \
+             symrdma_proc.o \
+             symrdma_nic.o
+
+# Debug flags — remove for production
+ccflags-y := -g -O2 -Wall -Werror
+# (插桩已移除 — 根因已定位并修复)
+
+ccflags-y += -I$(src)

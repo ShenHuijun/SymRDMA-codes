@@ -1,0 +1,382 @@
+--- a/drivers/infiniband/hw/mlx5/main_ext.c
++++ b/drivers/infiniband/hw/mlx5/main_ext.c
+@@ -771,6 +771,59 @@
+ module_param_named(dc_cnak_qp_depth, dc_cnak_qp_depth, uint, 0444);
+ MODULE_PARM_DESC(dc_cnak_qp_depth, "DC CNAK QP depth");
+ 
++/* SymRDMA: MTT identity mapping (论文 §4.2)。
++ *
++ * ★ 命名辨析 (两层 "identity" 不是一回事):
++ *   - 本参数:  MTT 条目 = 用户 VA (IOVA == VA) — 硬件仍经 IOMMU 翻译。
++ *              系统必须保持 IOMMU 翻译模式 (intel_iommu=on, 非 iommu=pt)。
++ *   - IOMMU passthrough 的 identity: IOVA == PA, 不做翻译 (iommu=pt) —
++ *              与本文档无关, 且与 SymRDMA 互斥 (symrdma.ko 会拒绝附加)。
++ *
++ * 语义: 开启后用户 MR 的 MTT 条目 = 用户 VA，地址翻译完全交给系统
++ * IOMMU —— SymRDMA 内核模块已在 NIC 的 IOMMU 域中映射
++ * VA → 真实PA / 哨兵页 / 黑洞页。仅影响用户 MR 的 MTT，
++ * QP/CQ/SRQ 缓冲区仍走 dma_map (dma IOVA)。
++ *
++ * 影响: (1) 所有用户 MR 的 DMA 缓冲区都必须有 SymRDMA IOMMU 映射,
++ * 否则 DMA fault (未 hook 应用直接故障);
++ * (2) IOMMU 页表粒度 4KB (用户 VA 碎片) → IOTLB 压力, 性能影响
++ * 
++ *
++ * 加载时固定 (0444 只读) — 切换需重载模块。
++ * 0 (默认) = 按 MR 选择性激活: 带 SYMRDMA_ACCESS_IDENTITY 标记位
++ *   (1<<21, libnprdma/libsymrdma 注入) 的 MR 走 identity, 普通应用
++ *   完全原版路径 (论文 §4.2 "unaffected", P4/);
++ * 1 = 全局强制: 所有用户 MR 走 identity (未 hook 应用会 DMA fault)。
++ */
++bool mlx5_ib_identity_mtt;
++module_param_named(identity_mtt, mlx5_ib_identity_mtt, bool, 0444);
++MODULE_PARM_DESC(identity_mtt,
++		 "SymRDMA: MTT entries = user VA (IOVA==VA), IOMMU translates. NOT iommu passthrough. 0=vanilla behavior");
++
++/* SymRDMA: write-only MR (REMOTE_WRITE 无 REMOTE_READ) 的 MTT 偏移。
++ * 写区域 MTT 条目 = VA + 偏移 → NIC DMA 经 IOMMU 命中 write_iova
++ * (驻留→真实PA, 缺失→黑洞页), 哨兵页不被写入污染。
++ * 取值须与 SymRDMA 内核模块的 SYMRDMA_MR_WRITE_OFFSET 一致 (32GB)。
++ * 默认 0 = 关闭 (写区域退化为 MTT=VA, 与 identity_mtt 单 VA 行为相同)。 */
++u64 mlx5_ib_identity_mtt_womr_offset;
++module_param_named(identity_mtt_write_offset, mlx5_ib_identity_mtt_womr_offset,
++		   ullong, 0444);
++MODULE_PARM_DESC(identity_mtt_write_offset,
++		 "SymRDMA: MTT offset (bytes) for write-only MRs (REMOTE_WRITE w/o REMOTE_READ), e.g. 34359738368");
++
++/* SymRDMA (论文 §4.2): identity MTT 条目页大小 (log2)。
++ * 默认 31 = 2GB (mkc.log_page_size 5 位字段上限, NIC 原生大页):
++ * 128GB MR 仅 64 条目 → on-chip MTT cache 结构性不 miss。
++ * 条目值 = 用户 VA 基址 (恒等): HW 计算 PA = MTT[k] + 段内偏移,
++ * 段基址 4KB 对齐即可 (应用 VA 天然满足), 无需物理对齐。
++ * reg_create/pas_identity/缓冲区全长 page_size 自适应; 异常时置 12
++ * 回退 4KB 逐页。 */
++unsigned int mlx5_ib_identity_mtt_log_pgsize = 31;
++module_param_named(identity_mtt_log_pgsize, mlx5_ib_identity_mtt_log_pgsize,
++		   uint, 0444);
++MODULE_PARM_DESC(identity_mtt_log_pgsize,
++		 "SymRDMA: identity MTT entry log2 page size (12-31, default 31=2GB, paper 4.2)");
++
+ static void mlx5_ib_enable_dc_tracer(struct mlx5_ib_dev *dev)
+ {
+         struct device *device = dev->ib_dev.dma_device;
+--- a/drivers/infiniband/hw/mlx5/mem.c
++++ b/drivers/infiniband/hw/mlx5/mem.c
+@@ -53,6 +53,37 @@
+ }
+ 
+ /*
++ * SymRDMA: identity 版本 — MTT 条目直接填用户 VA (论文 §4.2)。
++ * 地址翻译完全交给系统 IOMMU: SymRDMA 内核模块已在 NIC 的 IOMMU 域中
++ * 映射 VA → 真实PA / 哨兵页 / 黑洞页。
++ * 仅由 MR 注册路径调用 (mr.c)；QP/CQ/SRQ 缓冲区仍走 dma IOVA。
++ *
++ * va_offset: write-only MR (写区域) 的偏移 — 条目 = VA + 偏移,
++ * 使 RDMA Write 命中 write_iova (驻留→真实PA, 缺失→黑洞页)。
++ */
++void mlx5_ib_populate_pas_identity(u64 va_start, size_t length,
++				   size_t page_size, __be64 *pas,
++				   u64 access_flags)
++{
++	/*
++	 *  按页数迭代 — 不能用 rdma_umem_for_each_dma_block
++	 * (它按 sg 链表迭代; no-pin umem 的 sg 为空 → 循环 0 次 →
++	 * MTT 全空 → responder NAK/RETRY_EXCEEDED, no-pin 实测教训)。
++	 *  改为显式 (va_start, length) — 2GB 大页条目下 MKEY
++	 * start_addr 下取整到条目边界、长度扩展, 条目数按扩展后长度计。
++	 */
++	size_t npages = DIV_ROUND_UP(length, page_size);
++	size_t i;
++	u64 va = va_start;
++
++	for (i = 0; i < npages; i++) {
++		*pas = cpu_to_be64(va | access_flags);
++		va += page_size;
++		pas++;
++	}
++}
++
++/*
+  * Compute the page shift and page_offset for mailboxes that use a quantized
+  * page_offset. The granulatity of the page offset scales according to page
+  * size.
+--- a/drivers/infiniband/hw/mlx5/mr.c
++++ b/drivers/infiniband/hw/mlx5/mr.c
+@@ -48,6 +48,21 @@
+ #include <rdma/ib_verbs.h>
+ #include "dm.h"
+ #include "mlx5_ib.h"
++/* SymRDMA (P4): 按 MR 选择性激活 identity 的标记位。
++ * 复用 uverbs access_flags 的 optional 范围位 (bit 21; OPTIONAL 20-29,
++ * RELAXED_ORDERING 占 20, 21 空闲) — libnprdma/libsymrdma 注册 SymRDMA
++ * MR 时 OR 此位, 内核据此走 identity 分支; 普通应用不带位 → 原版路径。 */
++#define MLX5_IB_ACCESS_SYMRDMA (1 << 21)
++/* SymRDMA: 显式写区域标记位 (bit 22, OPTIONAL 20-29 空闲)。
++ * 旧启发式 (无 REMOTE_READ ⇒ 写区域) 会误伤 LOCAL_WRITE-only 的
++ * "DMA 读源" MR (如 perftest ibv_wr 源 buffer): 其 MTT=VA+32GB 写区
++ * 在页翻入黑洞后 NIC 读源数据被 IOMMU 拒绝 (DMAR reason 06) →
++ * LOC_PROT 0x51 (TESTING §5.2 发现)。改为引擎显式置位, 普通应用的
++ * LOCAL_WRITE-only MR (send 源/接收 buffer) 恒走 read_iova:
++ * 驻留→真实 PA (读写皆可), 翻转→哨兵 (可读, 写被只读哨兵吸收) —
++ * 与  哨兵只读加固配合, 污染结构性不可能。 */
++#define MLX5_IB_ACCESS_SYMRDMA_WREG (1 << 22)
++
+ #include "ib_rep.h"
+ 
+ /*
+@@ -884,6 +899,11 @@
+ 	mr->ibmr.device = &dev->ib_dev;
+ 	mr->ibmr.iova = iova;
+ 	mr->access_flags = access_flags;
++	/* SymRDMA: 写区域 = 显式 WREG 标记的 MR (旧: 无 REMOTE_READ)。
++	 * 引擎只为确知的写目标 MR 置位 (纯写 MR / 混合 MR 的写区域辅助 MR);
++	 * LOCAL_WRITE-only 源 MR 走 read_iova, NIC 读源不再被黑洞拒绝。 */
++	mr->identity_womr =
++		!!(access_flags & MLX5_IB_ACCESS_SYMRDMA_WREG);
+ }
+ 
+ static unsigned int mlx5_umem_dmabuf_default_pgsz(struct ib_umem *umem,
+@@ -1178,6 +1198,11 @@
+ 	struct mlx5_mtt *mtt;
+ 	size_t final_size;
+ 	struct ib_sge sg;
++	u64 umem_va = mr->umem->address;   /* SymRDMA: identity MTT 用 */
++	/* SymRDMA: 写区域 (write-only MR) → MTT = VA + 偏移 (write_iova 黑洞区) */
++	if (mlx5_ib_identity_mtt && mr->identity_womr &&
++	    mlx5_ib_identity_mtt_womr_offset)
++		umem_va += mlx5_ib_identity_mtt_womr_offset;
+ 	int err = 0;
+ 
+ 	if (WARN_ON(mr->umem->is_odp))
+@@ -1214,6 +1239,12 @@
+ 		cur_mtt->ptag =
+ 			cpu_to_be64(rdma_block_iter_dma_address(&biter) |
+ 				    MLX5_IB_MTT_PRESENT);
++		/* SymRDMA: identity MTT — 条目 = 用户 VA, IOMMU 翻译 */
++		if (mlx5_ib_identity_mtt) {
++			cur_mtt->ptag =
++				cpu_to_be64(umem_va | MLX5_IB_MTT_PRESENT);
++			umem_va += BIT(mr->page_shift);
++		}
+ 
+ 		if (mr->umem->is_dmabuf && (flags & MLX5_IB_UPD_XLT_ZAP))
+ 			cur_mtt->ptag = 0;
+@@ -1252,6 +1283,8 @@
+ 	u32 *in;
+ 	int err;
+ 	bool pg_cap = !!(MLX5_CAP_GEN(dev->mdev, pg));
++	u64 mkc_iova, mkc_len;   /* SymRDMA  identity 2GB 对齐 start/len */
++	bool identity;
+ 
+ 	if (!page_size)
+ 		return ERR_PTR(-EINVAL);
+@@ -1261,12 +1294,39 @@
+ 
+ 	mr->ibmr.pd = pd;
+ 	mr->access_flags = access_flags;
++	/* SymRDMA: 写区域 = 显式 WREG 标记 (见缓存 MR 路径注释;
++	 * 旧启发式 "无 REMOTE_READ" 误伤 perftest LOCAL_WRITE-only 源 MR,
++	 * 黑洞只写映射拒读 → LOC_PROT, TESTING §5.2)。 */
++	mr->identity_womr =
++		!!(access_flags & MLX5_IB_ACCESS_SYMRDMA_WREG);
+ 	mr->page_shift = order_base_2(page_size);
+ 
++	/* SymRDMA  (论文 §4.2 2GB 条目): MTT 条目地址按条目页大小
++	 * 取帧 (HW 语义, 实测 status=11 验证) — 恒等条目必须条目对齐。
++	 * MKEY start_addr 下取整到条目边界、长度相应扩展:
++	 *   MTT[k] = start + k*pgsize (全对齐)
++	 *   PA = MTT[k] + (VA - start 段内偏移) = VA (恒等)
++	 * 对任意 4KB 对齐 VA 基址成立。向下扩展的 VA 窗口由 IOMMU 门禁
++	 * 兜底 (未注册 VA 无映射 → DMA fault 拒绝)。4KB 条目 (log=12)
++	 * 时 start 不变, 行为与旧版一致。仅 identity+populate 生效。 */
++	identity = populate && umem &&
++		   (mlx5_ib_identity_mtt ||
++		    (access_flags & MLX5_IB_ACCESS_SYMRDMA));
++	mkc_iova = iova;
++	mkc_len  = umem ? umem->length : 0;
++	if (identity && mr->page_shift > PAGE_SHIFT) {
++		u64 mask = (1ULL << mr->page_shift) - 1;
++
++		mkc_iova = iova & ~mask;
++		mkc_len  = umem->length + (iova - mkc_iova);
++	}
++
+ 	inlen = MLX5_ST_SZ_BYTES(create_mkey_in);
+ 	if (populate)
+ 		inlen += sizeof(*pas) *
+-			 roundup(ib_umem_num_dma_blocks(umem, page_size), 2);
++			 roundup(identity ? DIV_ROUND_UP(mkc_len, page_size)
++					 : ib_umem_num_dma_blocks(umem, page_size),
++				 2);
+ 	in = kvzalloc(inlen, GFP_KERNEL);
+ 	if (!in) {
+ 		err = -ENOMEM;
+@@ -1278,8 +1338,19 @@
+ 			err = -EINVAL;
+ 			goto err_2;
+ 		}
+-		mlx5_ib_populate_pas(umem, 1UL << mr->page_shift, pas,
+-				     pg_cap ? MLX5_IB_MTT_PRESENT : 0);
++		/* SymRDMA: identity MTT — 条目 = 用户 VA 基址 (+写区域偏移),
++		 * 2GB 大页下 start_addr 已下取整对齐 (见上), IOMMU 翻译。
++		 * 判定含按 MR 标记位 (P4)。 */
++		if (identity)
++			mlx5_ib_populate_pas_identity(
++				mkc_iova + ((mr->identity_womr &&
++					     mlx5_ib_identity_mtt_womr_offset) ?
++					    mlx5_ib_identity_mtt_womr_offset: 0),
++				mkc_len, page_size, pas,
++				pg_cap ? MLX5_IB_MTT_PRESENT : 0);
++		else
++			mlx5_ib_populate_pas(umem, 1UL << mr->page_shift, pas,
++					     pg_cap ? MLX5_IB_MTT_PRESENT : 0);
+ 	}
+ 
+ 	/* The pg_access bit allows setting the access flags
+@@ -1287,16 +1358,17 @@
+ 	MLX5_SET(create_mkey_in, in, pg_access, !!(pg_cap));
+ 
+ 	mkc = MLX5_ADDR_OF(create_mkey_in, in, memory_key_mkey_entry);
+-	set_mkc_access_pd_addr_fields(mkc, access_flags, iova,
++	set_mkc_access_pd_addr_fields(mkc, access_flags, mkc_iova,
+ 				      populate ? pd : dev->umrc.pd);
+ 	MLX5_SET(mkc, mkc, free, !populate);
+ 	MLX5_SET(mkc, mkc, access_mode_1_0, MLX5_MKC_ACCESS_MODE_MTT);
+ 	MLX5_SET(mkc, mkc, umr_en, 1);
+ 
+-	MLX5_SET64(mkc, mkc, len, umem->length);
++	/* SymRDMA  identity 下用扩展后的 start/len (2GB 对齐) */
++	MLX5_SET64(mkc, mkc, len, mkc_len);
+ 	MLX5_SET(mkc, mkc, bsf_octword_size, 0);
+ 	MLX5_SET(mkc, mkc, translations_octword_size,
+-		 get_octo_len(iova, umem->length, mr->page_shift));
++		 get_octo_len(mkc_iova, mkc_len, mr->page_shift));
+ 	MLX5_SET(mkc, mkc, log_page_size, mr->page_shift);
+ 
+ 	if (mlx5_umem_needs_ats(dev, umem, access_flags))
+@@ -1433,11 +1505,30 @@
+ 	int err;
+ 
+ 	xlt_with_umr = mlx5_ib_can_load_pas_with_umr(dev, umem->length);
++	/* SymRDMA no-pin: sg 为空, UMR 路径 (update_xlt) 按 sg
++	 * 迭代会崩 — 强制直接 CREATE_MKEY 填充 (populate_pas_identity
++	 * 按页数迭代, 不读 sg)。大 MR 的直接填充受 kvzalloc 限制。 */
++	if ((mlx5_ib_identity_mtt ||
++	     (access_flags & MLX5_IB_ACCESS_SYMRDMA)) && !umem->is_peer)
++		xlt_with_umr = false;
+ 	if (xlt_with_umr && !umem->is_peer) {
+ 		mr = alloc_cacheable_mr(pd, umem, iova, access_flags);
+ 	} else {
+-		unsigned int page_size = mlx5_umem_find_best_pgsz(
+-			umem, mkc, log_page_size, 0, iova);
++		unsigned int page_size;
++
++		if (mlx5_ib_identity_mtt ||
++		    (access_flags & MLX5_IB_ACCESS_SYMRDMA))
++			/* 论文 §4.2: identity MTT 用 NIC 原生 2GB
++			 * 大页条目 (log_page_size 5 位字段上限 31) — 128GB MR
++			 * 仅 64 条目, on-chip MTT cache 结构性不 miss。
++			 * 条目值 = 用户 VA 基址 (恒等): PA = MTT[k] + 段内偏移,
++			 * 段基址 4KB 对齐即可 (应用 VA 天然满足)。
++			 * reg_create/pas_identity/缓冲区长 page_size 自适应;
++			 * 异常时 identity_mtt_log_pgsize=12 回退 4KB 逐页。 */
++			page_size = 1UL << mlx5_ib_identity_pgsize_log();
++		else
++			page_size = mlx5_umem_find_best_pgsz(
++				umem, mkc, log_page_size, 0, iova);
+ 
+ 		mutex_lock(&dev->slow_path_mutex);
+ 		mr = reg_create(pd, umem, iova, access_flags, page_size,
+@@ -1545,12 +1636,33 @@
+ {
+ 	struct mlx5_ib_dev *dev = to_mdev(pd->device);
+ 	struct ib_umem *umem;
++	/* SymRDMA (P4): 按 MR 选择性激活 identity —
++	 * 带 SYMRDMA 标记位 (libnprdma/libsymrdma 注入, access_flags 的
++	 * optional 范围位 1<<21) 或全局 identity_mtt=1 时走 identity 分支;
++	 * 普通应用 (无标记, identity_mtt=0) 走原版路径 — 论文 §4.2
++	 * "Applications not using SymRDMA are unaffected"。 */
++	bool identity = mlx5_ib_identity_mtt ||
++			(access_flags & MLX5_IB_ACCESS_SYMRDMA);
+ 
+ 	if (!IS_ENABLED(CONFIG_INFINIBAND_USER_MEM))
+ 		return ERR_PTR(-EOPNOTSUPP);
+ 
+ 	mlx5_ib_dbg(dev, "start 0x%llx, iova 0x%llx, length 0x%llx, access_flags 0x%x\n",
+ 		    start, iova, length, access_flags);
++	/* SymRDMA: identity MTT 与 ODP 互斥 — ODP 按需填表假设条目是
++	 * dma IOVA, 与 identity 语义冲突 */
++	if (identity && (access_flags & IB_ACCESS_ON_DEMAND))
++		return ERR_PTR(-EOPNOTSUPP);
++	/* SymRDMA no-pin: identity 模式下不 pin 不 dma_map —
++	 * MTT 条目 = 用户 VA, 翻译由 SymRDMA 的 IOMMU 映射完成。
++	 * 换出页由 MMU notifier 重定向哨兵/黑洞, REPAIR 时按需换入。 */
++	if (identity) {
++		umem = ib_umem_get_nopin(&dev->ib_dev, start, length,
++					 access_flags);
++		if (IS_ERR(umem))
++			return ERR_CAST(umem);
++		return create_real_mr(pd, umem, iova, access_flags);
++	}
+ #ifdef CONFIG_INFINIBAND_ON_DEMAND_PAGING
+ 	if ((access_flags & IB_ACCESS_ON_DEMAND) && (dev->profile != &raw_eth_profile))
+ 		return create_user_odp_mr(pd, start, length, iova, access_flags,
+@@ -1600,6 +1712,10 @@
+ 	struct ib_umem_dmabuf *umem_dmabuf;
+ 	int err;
+ 
++	/* SymRDMA: dmabuf 页面不在 SymRDMA 的 IOMMU 映射中, identity 不适用 */
++	if (mlx5_ib_identity_mtt)
++		return ERR_PTR(-EOPNOTSUPP);
++
+ 	if (!IS_ENABLED(CONFIG_INFINIBAND_USER_MEM) ||
+ 	    !IS_ENABLED(CONFIG_INFINIBAND_ON_DEMAND_PAGING))
+ 		return ERR_PTR(-EOPNOTSUPP);
+@@ -1806,6 +1922,12 @@
+ 	if (flags & ~(IB_MR_REREG_TRANS | IB_MR_REREG_PD | IB_MR_REREG_ACCESS))
+ 		return ERR_PTR(-EOPNOTSUPP);
+ 
++	/* SymRDMA: identity+no-pin 下 rereg 的 TRANS 路径会重建
++	 * umem/走 UMR (空 sg 崩) — 暂不支持 (含按 MR 标记) */
++	if (mlx5_ib_identity_mtt ||
++	    (new_access_flags & MLX5_IB_ACCESS_SYMRDMA))
++		return ERR_PTR(-EOPNOTSUPP);
++
+ 	if (!(flags & IB_MR_REREG_ACCESS))
+ 		new_access_flags = mr->access_flags;
+ 	if (!(flags & IB_MR_REREG_PD))
+--- a/drivers/infiniband/hw/mlx5/mlx5_ib.h
++++ b/drivers/infiniband/hw/mlx5/mlx5_ib.h
+@@ -721,6 +721,8 @@
+ 			unsigned int page_shift;
+ 			/* Current access_flags */
+ 			int access_flags;
++			/* SymRDMA: write-only 区域 (REMOTE_WRITE 无 REMOTE_READ) */
++			bool identity_womr;
+ 
+ 			/* For User ODP */
+ 			struct mlx5_ib_mr *parent;
+@@ -1397,6 +1399,23 @@
+ 		       struct ib_port_attr *props);
+ void mlx5_ib_populate_pas(struct ib_umem *umem, size_t page_size, __be64 *pas,
+ 			  u64 access_flags);
++/* SymRDMA: identity MTT (IOVA = 用户 VA), 仅用于 MR 路径 */
++extern bool mlx5_ib_identity_mtt;
++/* SymRDMA: write-only MR 的 MTT 偏移 (write_iova = VA + 32GB) */
++extern u64 mlx5_ib_identity_mtt_womr_offset;
++/* SymRDMA: identity MTT 条目页大小 log2 (论文 §4.2 2GB 大页) */
++extern unsigned int mlx5_ib_identity_mtt_log_pgsize;
++/* identity 分支的 MTT 条目页大小 log (钳制到 mkc.log_page_size 5 位
++ * 字段范围 12-31; 31 = 2GB = NIC 原生上限, 论文 §4.2) */
++static inline unsigned int mlx5_ib_identity_pgsize_log(void)
++{
++	unsigned int log = mlx5_ib_identity_mtt_log_pgsize;
++
++	return log > 31 ? 31 : (log < 12 ? 12 : log);
++}
++void mlx5_ib_populate_pas_identity(u64 va_start, size_t length,
++				   size_t page_size, __be64 *pas,
++				   u64 access_flags);
+ void mlx5_ib_copy_pas(u64 *old, u64 *new, int step, int num);
+ int mlx5_ib_get_cqe_size(struct ib_cq *ibcq);
+ int mlx5_mr_cache_init(struct mlx5_ib_dev *dev);

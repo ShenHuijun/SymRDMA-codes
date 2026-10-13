@@ -1,0 +1,12 @@
+# symtest 可选运行时增强 — 全部非必需（核心零依赖, 纯 stdlib 即可运行全部套件）
+#
+# 安装: pip install -r tests/scripts/symtest/requirements.txt
+# 降级: 卸载后输出自动回到纯文本; 或 SYMTEST_PLAIN=1 强制纯文本
+#
+# rich         Level 汇总表带边框着色 + 长轮询单行进度（racebw 60min 等待
+#              不再静默）; 非 TTY 自动降级, 日志文件不受 ANSI 污染
+# argcomplete  CLI 子命令/参数补全（需 shell 注册, 见 symtest/README.md）
+rich>=13
+argcomplete>=3
+# 仅 nopf-pipeline 出图需要 (plot_nopf_bw.py):
+matplotlib>=3.8

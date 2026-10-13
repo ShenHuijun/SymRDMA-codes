@@ -1,0 +1,32 @@
+# symtest lint 配置 — ruff check tests/scripts/symtest/
+# 目标: 干净的质量门禁 (仅启用有真实价值的规则, 忽略刻意形态)
+# 格式风格 (对齐注释/行宽) 不交给 ruff format — 保持现有手工排版。
+
+target-version = "py310"
+line-length = 100
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes (未用导入/未定义名等硬伤)
+    "B",    # bugbear (常见真 bug)
+    "UP",   # pyupgrade (语法现代化)
+    "SIM",  # 代码简化
+    "RUF",  # ruff 自家规则
+]
+ignore = [
+    "SIM115",  # Tee/run_level 的 open+finally.close 是刻意形态 (流式写生命周期跨回调)
+    "PLW1510", # subprocess.run 不用 check= — rc 是数据, 不走异常
+    "RUF059",  # unpack 未用变量在 handler 元组解构中常见
+    "RUF001",  # 字符串中的全角标点 (中文文档/输出是本项目常态)
+    "RUF002",  # 同上 (docstring)
+    "RUF003",  # 同上 (注释)
+    "SIM117",  # 嵌套 with (contextlib.redirect_stdout + 自定义 CM) 可读性优先
+    "UP031",   # printf 风格 %s 仅剩 1 处历史形态
+    "PYI034",  # __enter__ 注解 — UP037 修后仅为形式问题
+]
+
+[lint.per-file-ignores]
+"selftest.py" = ["B011"]  # assert False 不用于自测 (unittest 形态)
+"diag_invalidate.py" = ["E501"]  # 内嵌远端取证脚本 (bash 原文迁移, 不重排)

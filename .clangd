@@ -1,0 +1,16 @@
+# clangd 配置 — 本仓库 compile_commands.json 由 scripts/gen_compile_commands.py
+# 从 gcc 干跑输出生成, 内核条目含 clang 驱动不认识的 gcc 专属 flag, 在此剔除
+# (用 clangd --check 实测确定的清单, clang 22 / 2026-09)
+CompileFlags:
+  Remove:
+    - -Werror                            # 编辑器内不把 warning 升级为 error
+    - -mpreferred-stack-boundary=*
+    - -mindirect-branch=*                # thunk-extern 等 retpoline 相关
+    - -mindirect-branch-register
+    - -fno-allow-store-data-races
+    - -fzero-init-padding-bits=*
+    - -fdiagnostics-show-context=*
+    - -fmin-function-alignment=*
+    - -fconserve-stack
+Diagnostics:
+  UnusedIncludes: None
