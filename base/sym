@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# sym — build SymRDMA on this machine, install it, write its runtime env,
+# uninstall it.
+#
+#   sym build     [ofed=<dir>] [--skip-ofed] [force=<stage|all>] [--dry-run] [KDIR=<dir>] [kind=prod|test]
+#   sym install   [mode=1|0] [pci_bdf=<domain:bus:dev.fn>] [--skip-ofed] [force=<stage|all>]
+#                 [kind=prod|test] [params="<module params>"] [test_params="<module params>"]
+#                 [--dry-run] [ofed_full=1]        (sudo)
+#   sym env       [--print] [--out <path>]
+#   sym uninstall [--purge] [--dry-run]              (sudo)
+#   sym --help | sym --version
+set -u
+
+SYM_BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SYM_ROOT="$(cd "$SYM_BASE/.." && pwd)"
+. "$SYM_BASE/lib/log.sh"
+
+SYM_HOME="${SYM_HOME:-$HOME/sym}"
+
+. "$SYM_BASE/lib/stages.sh"
+
+usage() {
+	cat <<'USAGE'
+sym — build SymRDMA on this machine, install it, write its runtime env,
+uninstall it. "sym build" needs no privileges; "sym install" applies what
+build produced and needs root.
+
+  sym build  [ofed=<dir>] [--skip-ofed] [force=<stage|all>] [--dry-run] [KDIR=<dir>]
+             [kind=prod|test]
+      Three stages, each skipped when its inputs match the install record:
+        ofed/files   verify the lineage anchors of your OFED tree (ofed=<dir>
+                     must be the validated deployment tree — see ofed/README.md;
+                     distribution source trees are rejected), then copy the six
+                     shipped source files over it
+        ofed/build   compile the OFED tree with its own make -j (the first build
+                     takes minutes and must be confirmed: force=ofed/build, or
+                     answer the prompt; sym never runs ./configure)
+        build        compile kernel/ nprdma/ against this machine's headers
+      --skip-ofed   machine-checked: the running stack must already carry the
+                    changes (ib_umem_get_nopin in kallsyms, identity_mtt in
+                    mlx5_ib); the ofed/* stages are recorded as external
+      force=<stage|all>   redo one stage even if its inputs match
+      --dry-run     print the plan and the commands, execute and write nothing;
+                    exit 0 = the plan would succeed, exit 1 = it would fail
+
+  sym install  [mode=1|0] [pci_bdf=<domain:bus:dev.fn>] [--skip-ofed]
+               [force=<stage|all>] [--dry-run] [ofed_full=1]
+               [kind=prod|test] [params="<module params>"]
+               [test_params="<module params>"]                      (sudo)
+      Two stages; run sym build first — this flow fails closed without a
+      build record:
+        deploy       make install of the built OFED modules, depmod, write the
+                     identity-MTT module parameters, reload the IB stack
+        load         (re)load symrdma with mode= and pci_bdf=; writes the
+                     identity-MTT parameters first if they changed
+      mode=1 and pci_bdf= persist in the install record: a rerun without them
+      reuses the recorded values.
+      kind=  must match the build's kind (a test package will not install as a
+      production one); with kind=test the test face is loaded right after the
+      module under test. params= goes to the module under test (e.g.
+      "iommu_huge=0"), test_params= to the test face (e.g. "demote_fail_grp=2").
+      --skip-ofed   machine-checked, as in sym build; deploy is recorded as
+                    external and never runs
+      force=<stage|all>   redo one stage (force=load = just reload the module)
+      --dry-run     as in sym build
+
+  sym env [--print] [--out <path>]
+      Probe the local RDMA port (GID, IPv4, netdev, MTU), merge with the install
+      record and write $SYM_HOME/sym.env (default) or print it (--print).
+      Exits non-zero if the GID's IPv4 and the netdev address disagree.
+      On a host with several RDMA-capable links, write your link choice into
+      $SYM_HOME/sym.conf (SYM_IP=<address> and/or SYM_NETDEV=<name>); sym
+      never picks a link by itself.
+
+  sym uninstall [--purge] [--dry-run]      (sudo)
+      Unload symrdma and remove the identity-MTT module parameters.
+      --purge also removes the installed files under $SYM_HOME.
+      Safe to repeat: exits 0 when there is nothing to do.
+
+  sym --version     print the source revision this tree was built from
+
+Paths: the source tree is the directory this script lives in; state and env
+live in $SYM_HOME (default: ~/sym). When a command runs under sudo, pass
+SYM_HOME explicitly (sudo SYM_HOME=$HOME/sym ...) so the record lands where
+the unprivileged commands read it. sym.env exports the module coordinates
+(SYM_RDMA_IP, SYM_RDMA_GID, ...) and NP_RDMA_DEV for the test programs. See
+base/sym.env.example for the full key table.
+USAGE
+}
+
+version() {
+	local commit
+	commit="$(git -C "$SYM_ROOT" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
+	printf 'sym (SymRDMA base suite), source %s\n' "$commit"
+}
+
+cmd="${1:-}"
+[ -n "$cmd" ] || { usage >&2; exit 2; }
+shift
+
+case $cmd in
+	build)     . "$SYM_BASE/build.sh" ;;
+	install)   . "$SYM_BASE/install.sh" ;;
+	env)       . "$SYM_BASE/env.sh" ;;
+	uninstall) . "$SYM_BASE/uninstall.sh" ;;
+	--help|-h|help) usage ;;
+	--version|-V|version) version ;;
+	*) log_fail "sym" "unknown command: $cmd" "run: sym --help" ;;
+esac

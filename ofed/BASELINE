@@ -1,0 +1,34 @@
+# Lineage anchor and file digests for the OFED sources this project ships.
+# release: the MLNX_OFED release the validated deployment runs.
+# provenance: where these sources come from (see README.md).
+# anchor.<path>: files this project never modifies; their digests must match
+#   the user's tree before anything is copied, which proves the tree is the
+#   validated deployment tree and not a different OFED build.
+# file.<path>: the six files this project ships (ofed/*/modified/); sym
+#   install copies them over the tree after the anchors pass.
+release=MLNX_OFED 5.8-3.0.7.0
+provenance=the official MLNX_OFED 5.8-3.0.7.0 kernel source drop (MLNX_OFED_SRC tarball)
+#
+# Lineage detail: the pristine unpacked drop (MLNX_OFED_SRC-debian-5.8-3.0.7.0.tgz
+# -> MLNX_OFED_SRC-5.8-3.0.7.0/SOURCES/mlnx-ofed-kernel_5.8.orig.tar.gz)
+# digests of the three anchor files, before the drop's own `configure` (the
+# official backport pass for the baseline kernel 5.11) runs, are:
+#   drivers/infiniband/core/uverbs_cmd.c
+#     6efa3970c293289551f9614620f2cc1329a1cd651fe3fc2869324d4560a4549d
+#   drivers/infiniband/hw/mlx5/qp.c
+#     a7c5b5162b6a61c64910e0df5188dea657bb3217a7e1d6afb54c73f128f680aa
+#   drivers/infiniband/core/umem_odp.c
+#     f51c4a3434207b8d12f94c567999a777fcd32c6242fc5d89bf62b726937309ba
+# The anchors above are those same three files after configure — the state
+# the validated deployment tree is in when sym build checks it. configure
+# also rewrites the six file.* targets (the shipped files already carry
+# its result).
+anchor.drivers/infiniband/core/uverbs_cmd.c=c2db5670155a06bd5052d7590705116ba00f651c9fc106923f5eafe430bba321
+anchor.drivers/infiniband/hw/mlx5/qp.c=4a0b9a069fdd95925b4414ba025b76eeea8d7960dfc83f1bb59f7343ac8407e3
+anchor.drivers/infiniband/core/umem_odp.c=7e386394e291d237341040b7635be2455f19bd1837c749936f0ae3dd54ea0b69
+file.drivers/infiniband/core/umem.c=5fb31c7d64c5c0833589f780bd844afccadbc49bfad3aa9d6cd33373fdd1a5b9
+file.include/rdma/ib_umem.h=7b990ca64bbde0d31e388442922d21e3e6055137c06528a7a1d8733c1138be11
+file.drivers/infiniband/hw/mlx5/mr.c=d9e93ce0f071dc1b800b81e3e27574293c86be2fc0bd9162aea8163f69b9e569
+file.drivers/infiniband/hw/mlx5/mem.c=68818b77fe5c56d0ce72fbc2a359fff22d46c998f791393dcd5ef69aed0794c2
+file.drivers/infiniband/hw/mlx5/main_ext.c=597a233c083f728a0ec39db1b95803f3d59200471162fb8ad85712aae7b569a4
+file.drivers/infiniband/hw/mlx5/mlx5_ib.h=96f60d96721177fc70306602f7143e71485751c231aad5d63131ff70ab6c4477

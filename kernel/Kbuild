@@ -1,0 +1,51 @@
+# Kbuild for the SymRDMA kernel module
+#
+# Build command:
+#   make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
+#
+# Requires:
+#   - Linux kernel headers (linux-headers-$(uname -r))
+#   - IOMMU enabled (intel_iommu=on or iommu=on)
+#   - tested environment: Ubuntu 5.11.0-46 kernel + OFED 5.8
+#     (single supported target; 5.4/5.15 support branches were removed)
+#
+
+# The /dev/symrdma ABI lives in common/symrdma_abi.h and is shared with every
+# user-space consumer; the module adds that directory to its include path.
+ccflags-y += -I$(src)/../common
+
+obj-m := symrdma.o
+
+symrdma-y := symrdma_main.o \
+             symrdma_iommu.o \
+             symrdma_page.o \
+             symrdma_mr.o \
+             symrdma_notifier.o \
+             symrdma_pin.o \
+             symrdma_version.o \
+             symrdma_dev.o \
+             symrdma_proc.o \
+             symrdma_census.o \
+             symrdma_nic.o
+
+#
+# Two build kinds, one tree.
+#
+#   BUILD_KIND=prod  (default)  the module under test only
+#   BUILD_KIND=test             plus the test face: its own module, its own
+#                               device, its own command numbers and parameters
+#
+# The test face is not a flag inside the production module - it is a second
+# module that is not compiled for a production package, so a production tree
+# cannot load it even by asking for it.
+#
+BUILD_KIND ?= prod
+
+ifeq ($(BUILD_KIND),test)
+obj-m += symrdma_test.o
+endif
+
+# Debug flags — remove for production
+ccflags-y := -g -O2 -Wall -Werror
+
+ccflags-y += -I$(src)

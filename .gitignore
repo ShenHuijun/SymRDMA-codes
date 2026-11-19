@@ -1,0 +1,22 @@
+# Build products of the shipped trees (kernel module, static lib, preload lib).
+*.ko
+*.o
+*.a
+*.so
+*.mod
+*.mod.c
+*.order
+*.symvers
+*.cmd
+*.d
+.tmp_versions/
+
+# Local state written by `sym` (never tracked)
+local/
+
+# The OFED source drop, unpacked in place by `sym build`
+MLNX_OFED_SRC-*.tgz
+
+*.swp
+*.swo
+*~
